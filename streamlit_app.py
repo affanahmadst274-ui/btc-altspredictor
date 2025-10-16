@@ -387,6 +387,88 @@ if predict:
         st.success('✅ Predictions saved and models updated.')
     else:
         st.info('No predictions produced. Try again or expand data window.')
+# ------------------------- Backtesting + Evaluation -------------------------
+import time
+
+def update_backtest_results():
+    """Compare stored predictions with actual returns after 7 days."""
+    ensure_pred_file()
+    df = pd.read_csv(PRED_CSV, parse_dates=["date"])
+    if df.empty:
+        st.info("No predictions found for backtesting.")
+        return pd.DataFrame()
+
+    updated_rows = []
+    for i, row in df.iterrows():
+        if pd.notna(row["actual_return"]):
+            continue  # already evaluated
+
+        days_since = (datetime.utcnow() - row["date"]).days
+        if days_since < 7:
+            continue  # not enough time yet
+
+        ticker = row["ticker"]
+        hist = safe_download(ticker, period="1mo")
+        if hist.empty or len(hist) < 7:
+            continue
+
+        start_date = row["date"]
+        end_date = start_date + pd.Timedelta(days=7)
+        actual_window = hist.loc[(hist.index >= start_date) & (hist.index <= end_date)]
+
+        if actual_window.empty:
+            continue
+
+        start_price = actual_window.iloc[0, 0]
+        end_price = actual_window.iloc[-1, 0]
+        actual_return = (end_price - start_price) / start_price
+
+        df.at[i, "actual_return"] = actual_return
+        updated_rows.append((ticker, actual_return))
+
+    df.to_csv(PRED_CSV, index=False)
+    return df, updated_rows
+
+
+def show_backtest_performance(df):
+    """Visualize model accuracy based on backtested predictions."""
+    st.subheader("📊 Model Performance Tracker")
+
+    df_valid = df.dropna(subset=["pred_return", "actual_return"])
+    if df_valid.empty:
+        st.info("No evaluated predictions yet — wait for 7 days of data.")
+        return
+
+    df_valid["error"] = df_valid["actual_return"] - df_valid["pred_return"]
+    df_valid["hit"] = np.sign(df_valid["actual_return"]) == np.sign(df_valid["pred_return"])
+    accuracy = df_valid["hit"].mean() * 100
+    mae = df_valid["error"].abs().mean()
+
+    st.metric("Directional Accuracy", f"{accuracy:.2f}%")
+    st.metric("Mean Absolute Error", f"{mae:.4f}")
+
+    perf = df_valid.groupby("ticker")["hit"].mean().sort_values(ascending=False)
+    st.bar_chart(perf * 100)
+
+    # --- Historical trend ---
+    df_valid["date"] = pd.to_datetime(df_valid["date"])
+    daily_acc = df_valid.groupby(df_valid["date"].dt.date)["hit"].mean()
+    st.line_chart(daily_acc * 100, use_container_width=True)
+    st.caption("Blue line shows daily prediction accuracy (%) over time.")
+
+
+# Run update and show results
+st.markdown("---")
+st.subheader("🔍 Weekly Backtest Update")
+
+try:
+    updated_df, updated_rows = update_backtest_results()
+    if updated_rows:
+        st.success(f"✅ Updated {len(updated_rows)} backtest entries.")
+    show_backtest_performance(updated_df)
+except Exception as e:
+    st.warning(f"Backtest update failed: {e}")
 
 st.markdown('---')
+
 st.write('This research tool uses live Perplexity macro + sentiment data for enhanced crypto forecasts. ⚙️ Not financial advice.')
